@@ -39,3 +39,8 @@ docs/terminal-logs/
 
 # logs
 log.md
+
+# Local environment files
+.env
+.env.*
+!.env.example

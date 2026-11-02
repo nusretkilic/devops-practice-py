@@ -42,3 +42,29 @@ jobs:
             -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
             -Dsonar.host.url=https://sonarcloud.io
             -Dsonar.qualitygate.wait=true
+
+  container-security:
+    name: Container Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Build container image
+        run: |
+          docker build \
+            --pull \
+            --progress=plain \
+            -t devops-practice-py:ci .
+
+      - name: Trivy security gate
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.76.1 image \
+            --image-src docker \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            devops-practice-py:ci
