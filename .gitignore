@@ -37,4 +37,5 @@ docs/terminal-logs/
 # macOS
 .DS_Store
 
+# logs
 log.md
