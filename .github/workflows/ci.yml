@@ -14,7 +14,6 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -44,13 +43,20 @@ jobs:
             -Dsonar.qualitygate.wait=true
 
   container-security:
-    name: Container Security Scan
+    name: Container Security Scan (${{ matrix.arch }})
     needs: test
-    runs-on: ubuntu-latest
-
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
 
     steps:
       - name: Checkout
@@ -63,15 +69,20 @@ jobs:
           echo "IMAGE_NAME=$image" >> "$GITHUB_ENV"
 
       - name: Build container image
+        env:
+          IMAGE_ARCH: ${{ matrix.arch }}
         run: |
           docker build \
             --pull \
+            --platform "linux/${IMAGE_ARCH}" \
             --progress=plain \
             --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            -t "${IMAGE_NAME}:sha-${GITHUB_SHA}" .
+            -t "${IMAGE_NAME}:sha-${GITHUB_SHA}-${IMAGE_ARCH}" .
 
       - name: Trivy security gate
+        env:
+          IMAGE_ARCH: ${{ matrix.arch }}
         run: |
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
@@ -80,7 +91,7 @@ jobs:
             --scanners vuln \
             --severity HIGH,CRITICAL \
             --exit-code 1 \
-            "${IMAGE_NAME}:sha-${GITHUB_SHA}"
+            "${IMAGE_NAME}:sha-${GITHUB_SHA}-${IMAGE_ARCH}"
 
       - name: Log in to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -91,13 +102,76 @@ jobs:
             --username "$GITHUB_ACTOR" \
             --password-stdin
 
-      - name: Push scanned image to GHCR
+      - name: Push scanned platform image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: |
-          docker push "${IMAGE_NAME}:sha-${GITHUB_SHA}"
-          docker tag "${IMAGE_NAME}:sha-${GITHUB_SHA}" "${IMAGE_NAME}:latest"
-          docker push "${IMAGE_NAME}:latest"
+        env:
+          IMAGE_ARCH: ${{ matrix.arch }}
+        run: docker push "${IMAGE_NAME}:sha-${GITHUB_SHA}-${IMAGE_ARCH}"
 
       - name: Log out of GHCR
         if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: docker logout ghcr.io
+
+  container-security-gate:
+    name: Container Security Scan
+    needs:
+      - test
+      - container-security
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require test and both platform scans
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          SCAN_RESULT: ${{ needs.container-security.result }}
+        run: |
+          echo "Test result: ${TEST_RESULT}"
+          echo "Platform scan result: ${SCAN_RESULT}"
+          if [ "$TEST_RESULT" != "success" ] || [ "$SCAN_RESULT" != "success" ]; then
+            echo "Test or platform security checks did not succeed."
+            exit 1
+          fi
+
+  publish-multiplatform:
+    name: Publish multi-platform image
+    needs: container-security-gate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Define image name
+        shell: bash
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "IMAGE_NAME=$image" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io \
+            --username "$GITHUB_ACTOR" \
+            --password-stdin
+
+      - name: Publish commit manifest list
+        run: |
+          docker manifest create "${IMAGE_NAME}:sha-${GITHUB_SHA}" \
+            "${IMAGE_NAME}:sha-${GITHUB_SHA}-amd64" \
+            "${IMAGE_NAME}:sha-${GITHUB_SHA}-arm64"
+          docker manifest push "${IMAGE_NAME}:sha-${GITHUB_SHA}"
+
+      - name: Publish latest manifest list
+        run: |
+          docker manifest create "${IMAGE_NAME}:latest" \
+            "${IMAGE_NAME}:sha-${GITHUB_SHA}-amd64" \
+            "${IMAGE_NAME}:sha-${GITHUB_SHA}-arm64"
+          docker manifest push "${IMAGE_NAME}:latest"
+
+      - name: Verify published platforms
+        run: docker buildx imagetools inspect "${IMAGE_NAME}:sha-${GITHUB_SHA}"
+
+      - name: Log out of GHCR
+        if: always()
         run: docker logout ghcr.io
