@@ -1,0 +1,25 @@
+name: CI Workflow
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync
+        run: uv sync --locked
+
+      - name: Test
+        run: uv run --locked python -m pytest -v
