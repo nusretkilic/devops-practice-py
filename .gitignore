@@ -44,3 +44,13 @@ log.md
 .env
 .env.*
 !.env.example
+
+# Terraform: local state, plans and variables
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
