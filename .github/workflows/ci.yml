@@ -45,18 +45,31 @@ jobs:
 
   container-security:
     name: Container Security Scan
+    needs: test
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
+
+      - name: Define image name
+        shell: bash
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "IMAGE_NAME=$image" >> "$GITHUB_ENV"
 
       - name: Build container image
         run: |
           docker build \
             --pull \
             --progress=plain \
-            -t devops-practice-py:ci .
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            -t "${IMAGE_NAME}:sha-${GITHUB_SHA}" .
 
       - name: Trivy security gate
         run: |
@@ -67,4 +80,24 @@ jobs:
             --scanners vuln \
             --severity HIGH,CRITICAL \
             --exit-code 1 \
-            devops-practice-py:ci
+            "${IMAGE_NAME}:sha-${GITHUB_SHA}"
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io \
+            --username "$GITHUB_ACTOR" \
+            --password-stdin
+
+      - name: Push scanned image to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker push "${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          docker tag "${IMAGE_NAME}:sha-${GITHUB_SHA}" "${IMAGE_NAME}:latest"
+          docker push "${IMAGE_NAME}:latest"
+
+      - name: Log out of GHCR
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: docker logout ghcr.io
