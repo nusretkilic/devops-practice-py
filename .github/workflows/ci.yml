@@ -28,8 +28,19 @@ jobs:
       - name: Sync
         run: uv sync --locked
 
-      - name: Test
-        run: uv run --locked python -m pytest -v --cov=main --cov-report=xml --cov-report=term-missing
+      - name: Lint
+        run: uv run --locked ruff check .
+
+      - name: Format check
+        run: uv run --locked ruff format --check .
+
+      - name: Test and coverage gate
+        run: |
+          uv run --locked python -m pytest -v \
+            --cov=main \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=80
 
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@v8.4.0
@@ -175,3 +186,62 @@ jobs:
       - name: Log out of GHCR
         if: always()
         run: docker logout ghcr.io
+
+  deployment-validation:
+    name: Validate deployment and rollback
+    needs: publish-multiplatform
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Create local Kubernetes cluster
+        uses: helm/kind-action@v1.12.0
+        with:
+          version: v0.31.0
+          cluster_name: devops-practice
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3.1.2
+        with:
+          terraform_version: 1.14.4
+
+      - name: Configure registry authentication
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          kubectl create secret docker-registry ghcr-auth \
+            --docker-server=ghcr.io \
+            --docker-username="${GITHUB_ACTOR}" \
+            --docker-password="${GHCR_TOKEN}"
+
+      - name: Deploy immutable image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io \
+            --username "$GITHUB_ACTOR" \
+            --password-stdin
+          # The manifest digest is resolved from the published commit tag.
+          IMAGE_DIGEST="$(docker buildx imagetools inspect "ghcr.io/${GITHUB_REPOSITORY,,}:sha-${GITHUB_SHA}" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          terraform -chdir=infra/terraform init -upgrade=false
+          terraform -chdir=infra/terraform apply -auto-approve \
+            -var="image=ghcr.io/${GITHUB_REPOSITORY,,}@${IMAGE_DIGEST}" \
+            -var="image_pull_secret_name=ghcr-auth"
+          kubectl -n devops-practice rollout status deployment/devops-practice --timeout=180s
+          docker logout ghcr.io
+
+      - name: Verify rollback path
+        run: |
+          kubectl -n devops-practice set image deployment/devops-practice \
+            devops-practice=ghcr.io/nusretkilic/devops-practice-py:does-not-exist
+          if kubectl -n devops-practice rollout status deployment/devops-practice --timeout=30s; then
+            echo "The intentionally broken rollout unexpectedly succeeded."
+            exit 1
+          fi
+          kubectl -n devops-practice rollout undo deployment/devops-practice
+          kubectl -n devops-practice rollout status deployment/devops-practice --timeout=180s

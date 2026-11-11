@@ -26,6 +26,12 @@ variable "image" {
   }
 }
 
+variable "image_pull_secret_name" {
+  description = "Optional Kubernetes registry pull secret for private images."
+  type        = string
+  default     = null
+}
+
 locals {
   app_name = "devops-practice"
   labels = {
@@ -65,6 +71,13 @@ resource "kubernetes_deployment_v1" "app" {
       spec {
         automount_service_account_token = false
         host_network                    = false
+
+        dynamic "image_pull_secrets" {
+          for_each = var.image_pull_secret_name == null ? [] : [var.image_pull_secret_name]
+          content {
+            name = image_pull_secrets.value
+          }
+        }
 
         security_context {
           run_as_non_root = true
