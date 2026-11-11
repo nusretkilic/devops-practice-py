@@ -22,7 +22,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN addgroup -g 10001 app \
+RUN apk upgrade --no-cache \
+    && addgroup -g 10001 app \
     && adduser -D -H -u 10001 -G app app
 
 COPY --from=builder /app/.venv /app/.venv
